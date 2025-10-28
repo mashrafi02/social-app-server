@@ -30,7 +30,7 @@ const validationErrorHandler = (err) => {
 }
 
 const tokenExpiredErrorHandler = (err) => {
-    return new globalErrorHandler('token has been expired. Log in again!', 401)
+    return new globalErrorHandler('The link has been expired. Try Login to get a new one', 401)
 }
 
 const jsonwebtokenErrorHandler = (err) => {

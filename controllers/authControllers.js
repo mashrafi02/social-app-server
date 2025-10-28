@@ -5,6 +5,8 @@ const User = require('../models/userModel');
 const signToken = require('../utils/signToken');
 const sendMail = require('../utils/sendMail');
 const Queue = require('bull');
+const crypto = require('crypto');
+const sendResetEmail = require('../utils/sendResetMail');
 
 
 const emailQueue = new Queue('sendMail', {
@@ -21,7 +23,9 @@ const registration = asyncErrorHandler( async (req, res, next) => {
     const newUser = await User.create(req.body);
     const user = await User.findOne({_id:newUser._id});
 
-    const verifyToken = signToken(user._id, '10m');
+    const verifyToken = await user.createEmailVerificationToken();
+    await user.save({validateBeforeSave : false});
+    
     const requestURL = `${process.env.CLIENT_LOCAL_URL}/verify/${verifyToken}`;
 
     const mailOptions = {
@@ -32,11 +36,11 @@ const registration = asyncErrorHandler( async (req, res, next) => {
         requestURL
     }
     
-    // await emailQueue.add('verifyMail', mailOptions, {
-    //     attempts:5,
-    //     backoff:5000,
-    //     removeOnComplete:true
-    // });
+    await emailQueue.add('verifyMail', mailOptions, {
+        attempts:5,
+        backoff:5000,
+        removeOnComplete:true
+    });
 
     res.status(201).json({
         status:'succes',
@@ -47,23 +51,59 @@ const registration = asyncErrorHandler( async (req, res, next) => {
 
 const verifyMail = asyncErrorHandler( async (req, res, next) => {
     const {token} = req.params;
-    try {
-        const decodedToken = jwt.verify(token, process.env.JWT_SECRET_KEY);
-        await User.findByIdAndUpdate(decodedToken.id, {emailVerified:true});
 
-        res.status(200).json({
-            status:'success',
-            message: 'Email verified Successfully'
-        })
+    if(!token) return next(new globalErrorHandler('No verification code found', 404));
 
-    } catch (err) {
-        if(err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError'){
-            res.status(400).json({
-                status:'fail',
-                message: 'Invalid token or Token expired. Please try log in again'
-            })
-        }
+    const reqToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({emailVerificationToken:reqToken, emailVerificationTokenExpires: {$gt:Date.now()}});
+
+    if(!user) return next(new globalError('Invalid Token or token has expired. Log in to get a new one',400));
+
+    if(user.emailVerified) return next(new globalErrorHandler('The account is already verified', 400));
+
+    await User.findByIdAndUpdate(user._id, {
+        emailVerified:true,
+        emailVerificationToken:undefined,
+        emailVerificationTokenExpires:undefined
+    });
+
+    res.status(200).json({
+        status:'success',
+        message: 'Email verified Successfully',
+        userId: user._id
+    })
+
+});
+
+
+const reVerifyMail = asyncErrorHandler( async (req, res, next) => {
+
+    const user = await User.findById(req.user._id);
+
+    const verifyToken = await user.createEmailVerificationToken();
+    await user.save({validateBeforeSave : false});
+    
+    const requestURL = `${process.env.CLIENT_LOCAL_URL}/verify/${verifyToken}`;
+
+    const mailOptions = {
+        email: user.email,
+        subject: 'Verify Your Email at Social',
+        userName: user.fName,
+        message: 'to verify your email at social',
+        requestURL
     }
+    
+    await emailQueue.add('verifyMail', mailOptions, {
+        attempts:5,
+        backoff:5000,
+        removeOnComplete:true
+    });
+
+    res.status(201).json({
+        status:'succes',
+        message:'Verification mail sent successfully',
+    })
 });
 
 
@@ -75,33 +115,46 @@ const login = asyncErrorHandler(async (req, res, next) => {
 
     if(!(await userExists.comparePassword(password))) return next(new globalErrorHandler('invalid password', 400));
 
+    const accessToken = signToken(userExists._id.toString(), '7d');
+    const userData = await User.findById(userExists._id);
+
     if(!userExists.emailVerified) {
-        const verifyToken = signToken(userExists._id, '10m');
-        const requestURL = `${process.env.CLIENT_LOCAL_URL}/verify/${verifyToken}`;
-        const mailOptions = {
-                            email: userExists.email,
-                            subject: 'Verify Your Email at Social',
-                            userName: userExists.fName,
-                            message: 'to verify your email at social',
-                            requestURL
-                        };
-        await emailQueue.add('verifyMail', mailOptions, {
-                                                            attempts:5,
-                                                            backoff:5000,
-                                                            removeOnComplete:true
-                                                        });
+
+        const now = new Date();
+        const createdAt = new Date(userData.createdAt);
+        const diff = (now - createdAt) / (1000 * 60);
+        
+        if(diff > 10){
+            const verifyToken = await userData.createEmailVerificationToken();
+            await userData.save({validateBeforeSave:false});
+
+            const requestURL = `${process.env.CLIENT_LOCAL_URL}/verify/${verifyToken}`;
+            const mailOptions = {
+                                email: userExists.email,
+                                subject: 'Verify Your Email at Social',
+                                userName: userExists.fName,
+                                message: 'to verify your email at social',
+                                requestURL
+                            };
+            await emailQueue.add('verifyMail', mailOptions, {
+                                                                attempts:5,
+                                                                backoff:5000,
+                                                                removeOnComplete:true
+                                                            });
+        }
 
         return res.status(200).json({
-                status:'running',
+                status:'not verified',
                 message:'Please verify your email to continue',
+                data : {
+                    userData,
+                    accessToken
+                }
             })
     };
 
-    const accessToken = signToken(userExists._id, '7d');
-    const userData = await User.findById(userExists._id);
-
     res.status(200).json({
-        status:'success',
+        status:'verified',
         message:'logged in successfully',
         data:{
             userData,
@@ -111,9 +164,97 @@ const login = asyncErrorHandler(async (req, res, next) => {
 });
 
 
+const matchMail = asyncErrorHandler( async (req, res, next) => {
+    const {email} = req.body;
+
+    const mailMatched = await User.findOne({email});
+
+    if(!mailMatched) return next(new globalErrorHandler('This email does not exists', 404));
+
+    res.status(200).json({
+        status: 'success',
+        message: 'Email match found',
+        data : {
+            email: mailMatched.email,
+            profilePic: mailMatched.profilePic
+        }
+    })
+});
+
+
+const sendResetPassToken = asyncErrorHandler( async (req, res, next) => {
+    const {email} = req.body;
+    const user = await User.findOne({email});
+
+    const resetPassToken = await user.createResetPasswordToken();
+    user.save({validateBeforeSave:false});
+
+    const mailOptions = {
+                        email,
+                        subject: 'Reset Password validation token',
+                        userName: user.fName,
+                        message: 'to reset your password of your social account',
+                        resetPassToken
+                    };
+    await emailQueue.add('resetMail', mailOptions, {
+                                                        attempts:5,
+                                                        backoff:5000,
+                                                        removeOnComplete:true
+                                                    });
+
+    res.status(200).json({
+        status:'success',
+        message: 'reset password token sent successfully'
+    })
+    
+})
+
+
+const verifyResetPassToken = asyncErrorHandler( async (req, res, next) => {
+    const {email,token} = req.body;
+    const resetPasswordToken = crypto.createHash('sha256').update(token).digest('hex');
+    const user = await User.findOne({email,resetPasswordToken, resetPasswordTokenExpires: {$gt: Date.now()}});
+
+    if(!user) return next(new globalErrorHandler('Invalid token or token has expired', 400));
+
+    user.resetPasswordToken = undefined;
+    await user.save({validateBeforeSave:false});
+
+    res.status(200).json({
+        status: 'success',
+        message: 'Token matched'
+    })
+})
+
+
+const resetPassword = asyncErrorHandler( async (req, res, next) => {
+    const {email, password, confirmPassword} = req.body;
+
+    const user = await User.findOne({email, resetPasswordTokenExpires: {$gt: Date.now()}});
+
+    if(!user) return next(new globalErrorHandler('Your 5 minutes time limit has expired', 401));
+
+    user.password = password;
+    user.confirmPassword = confirmPassword;
+    user.resetPasswordTokenExpires = undefined;
+    user.passwordChangedAt = Date.now();
+
+    await user.save({validateModifiedOnly:true});
+
+    res.status(200).json({
+        status: 'success',
+        message:'Password changed successfull'
+    })
+})
+
+
 emailQueue.process('verifyMail', async job => {
     await sendMail(job.data)
 })
 
+emailQueue.process('resetMail', async job => {
+    await sendResetEmail(job.data)
+})
 
-module.exports = {registration, verifyMail, login}
+
+module.exports = {registration, verifyMail, reVerifyMail, login, matchMail, sendResetPassToken, verifyResetPassToken, resetPassword}

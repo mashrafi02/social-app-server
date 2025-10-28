@@ -43,6 +43,14 @@ const userSchema = new Schema({
         type : Boolean,
         default : false,
     },
+    emailVerificationToken : {
+        type:String,
+        select:false,
+    },
+    emailVerificationTokenExpires : {
+        type: Date,
+        select: false,
+    },
     age: {
         type: Number,
         required: [true, 'age is required'],
@@ -235,13 +243,23 @@ userSchema.methods.comparePassword = async function(password){
 }
 
 userSchema.methods.createResetPasswordToken = async function (){
-    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetToken = crypto.randomBytes(16).toString('hex');
     const encryptResetToken =  crypto.createHash('sha256').update(resetToken).digest('hex');
 
     this.resetPasswordToken = encryptResetToken;
     this.resetPasswordTokenExpires = Date.now() + 5 * 60 * 1000;
 
     return resetToken;
+}
+
+userSchema.methods.createEmailVerificationToken = async function (){
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const encryptVerificationToken =  crypto.createHash('sha256').update(verificationToken).digest('hex');
+
+    this.emailVerificationToken = encryptVerificationToken;
+    this.emailVerificationTokenExpires = Date.now() + 10 * 60 * 1000;
+
+    return verificationToken;
 }
 
 userSchema.methods.isPasswordChnaged = async function (JWTTimestamp) {
