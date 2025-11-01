@@ -6,6 +6,8 @@ const compression = require('compression');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const globalErrorHandler = require('./utils/globalErrorHandler');
+const fileUpload = require('express-fileupload');
+
 
 
 const limiter = rateLimit({
@@ -31,6 +33,10 @@ app.use(cors({
               credentials: true
 }));
 
+app.use(fileUpload({
+  useTempFiles : true,
+}));
+
 app.use(express.json());
 app.use(cookieParser());
 app.use(compression());
@@ -39,9 +45,11 @@ if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
 
 const globalErrorController = require('./controllers/globalErrorController');
 const authRouter = require('./routes/authRoutes');
+const postRouter = require('./routes/postRoutes');
 
 app.use('/api', limiter);
 app.use('/api/v1/auth', authRouter);
+app.use('/api/v1/post', postRouter);
 
 
 app.use((req,res,next) => {
